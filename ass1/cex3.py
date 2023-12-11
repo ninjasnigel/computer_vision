@@ -40,9 +40,9 @@ def plot_camera(P, s=1, ax=None):
 
 
 # Load data from data/compEx3im1.jpg
-im1 = plt.imread('data/compEx3im1.jpg')
+im1 = plt.imread('ass1/data/compEx3im1.jpg')
 # Load data from data/compEx3im2.jpg
-im2 = plt.imread('data/compEx3im2.jpg')
+im2 = plt.imread('ass1/data/compEx3im2.jpg')
 
 #plot images side by side
 fig, ax = plt.subplots(1, 2)
@@ -51,7 +51,7 @@ ax[1].imshow(im2, cmap='gray')
 plt.show()
 
 # Load data from data/compEx3.mat
-mat = scipy.io.loadmat('data/compEx3.mat')
+mat = scipy.io.loadmat('ass1/data/compEx3.mat')
 
 # Calculate the camera centers and principal axes of the two cameras
 P1, P2, U = mat['P1'], mat['P2'], mat['U']

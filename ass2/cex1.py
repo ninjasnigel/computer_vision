@@ -29,7 +29,6 @@ def load_data(file_path):
     X = data['X']
     P_raw = data['P']
 
-    # P is a cell array in MATLAB, we need to extract each element (this sucked to figure out)
     Ps = []
     for i in range(P_raw.shape[1]):
         P_matrix = P_raw[0, i]
@@ -55,7 +54,7 @@ def project_and_plot(P, Xs, image_path):
 
 def main():
     # Load data
-    X, Ps, x, imfiles = load_data('data/compEx1data.mat')
+    X, Ps, x, imfiles = load_data('ass2/data/compEx1data.mat')
 
     # Plot initial 3D points and cameras
     plot_3d_points_and_images(X, Ps, imfiles)
