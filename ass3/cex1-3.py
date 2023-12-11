@@ -7,6 +7,9 @@ from skimage import color
 from numpy.linalg import svd
 from mpl_toolkits.mplot3d import Axes3D
 
+def pflat(x):
+    return x[:-1,:] / x[-1,:]
+
 def normalize_points(points):
     mean = np.mean(points[:2], axis=1)
     std_dev = np.std(points[:2], axis=1)
