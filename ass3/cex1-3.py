@@ -2,8 +2,6 @@ import numpy as np
 from scipy.linalg import null_space
 import scipy.io
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-from skimage import color
 from numpy.linalg import svd
 from mpl_toolkits.mplot3d import Axes3D
 
@@ -74,10 +72,14 @@ def estimate_F_DLT(x1s, x2s):
 
     return F_tilde, T1, T2
 
-def estimate_E_DLT(x1s, x2s):
+def estimate_E_DLT(x1s, x2s, normalize=True):
     # Normalize the points
-    x1s_normalized, T1, _, _ = normalize_points(x1s)
-    x2s_normalized, T2, _, _ = normalize_points(x2s)
+    if normalize:
+        x1s_normalized, T1, _, _ = normalize_points(x1s)
+        x2s_normalized, T2, _, _ = normalize_points(x2s)
+    else:
+        x1s_normalized = x1s
+        x2s_normalized = x2s
 
     # Set up matrix M
     num_points = x1s.shape[1]
@@ -166,25 +168,22 @@ def extract_P_from_E(E):
 
     return [P1, P2, P3, P4]
 
-def triangulate_point(point1, point2, M1, M2):
-    """
-    Triangulate a 3D point from two corresponding 2D points in different images.
-    
-    :param point1: 2D point in the first image.
-    :param point2: 2D point in the second image.
-    :param M1: Camera matrix for the first image.
-    :param M2: Camera matrix for the second image.
-    :return: Triangulated 3D point.
-    """
-    A = np.zeros((4, 4))
-    A[0] = point1[0] * M1[2] - M1[0]
-    A[1] = point1[1] * M1[2] - M1[1]
-    A[2] = point2[0] * M2[2] - M2[0]
-    A[3] = point2[1] * M2[2] - M2[1]
+def triangulate_point(P1, P2, x1, x2):
+    # Construct matrix A for DLT
+    A = np.array([
+        x1[0] * P1[2] - P1[0],
+        x1[1] * P1[2] - P1[1],
+        x2[0] * P2[2] - P2[0],
+        x2[1] * P2[2] - P2[1]
+    ])
 
-    _, _, Vh = np.linalg.svd(A)
-    X = Vh[-1]
-    return X / X[-1]
+    # Perform SVD
+    _, _, Vt = np.linalg.svd(A)
+    X = Vt[-1]
+    X = X / X[3]  # Dehomogenize
+
+    return X[:3]
+
 
 def is_in_front_of_camera(P, X):
     # Convert to homogenous coordinates
@@ -234,6 +233,10 @@ def plot_camera(P, s=1, ax=None):
 
     C, a = camera_center_axis(P)
 
+    # Invert the z-coordinate
+    C[2] *= -1
+    a[2] *= -1
+
     # Compute the end point of the principal axis scaled by s
     end_point = C + s * a
 
@@ -241,17 +244,17 @@ def plot_camera(P, s=1, ax=None):
     ax.scatter(C[0], C[1], C[2], c='r', marker='o')
     ax.plot([C[0], end_point[0]], [C[1], end_point[1]], [C[2], end_point[2]], 'r-')
 
+def convert_E_to_F(E, K1, K2):
+    # Convert the essential matrix back to the fundamental matrix
+    F = np.linalg.inv(K2).T @ E @ np.linalg.inv(K1)
+    return F
+
 # Load the data
 mat = scipy.io.loadmat('ass3/data/compEx1data.mat')
 x1s, x2s = mat['x'][0][0], mat['x'][1][0]
 
 # Estimate the fundamental matrix
 F = estimate_F_DLT(x1s, x2s)
-print("Estimated Fundamental Matrix:\n", F)
-
-# Select a pair of corresponding points
-x1 = x1s[:, 0]  # First point in the first image
-x2 = x2s[:, 0]  # Corresponding point in the second image
 
 # Load your image here and select 20 random points
 image1 = plt.imread('ass3/data/kronan1.JPG')
@@ -264,30 +267,19 @@ selected_x1s = x1s[:, selected_indices]
 # Compute the un-normalized fundamental matrix
 F_normalized, T1, T2 = estimate_F_DLT(x1s, x2s)
 F_unnormalized, _, _ = estimate_F_DLT_no_normalization(x1s, x2s)
+F_unnormalized /= F_unnormalized[2, 2]
+print("Original Estimated Fundamental Matrix:\n", F_unnormalized)
 
 # Check epipolar constraint
-print("Epipolar constraint F unnormalized:", x2.T @ F_unnormalized @ x1)
-print("Epipolar constraint F normalized:", x2.T @ F_normalized @ x1)
+epipolar_constraints = [x2s[:, i].T @ F_unnormalized @ x1s[:, i] for i in range(x1s.shape[1])]
+print("Mean of epipolar constraints unnormalized:", np.mean(epipolar_constraints))
 
 # Compute epipolar lines for the selected points
 epipolar_lines_normalized = compute_epipolar_lines(F_normalized, selected_x1s)
 epipolar_lines_unnormalized = compute_epipolar_lines(F_unnormalized, selected_x1s)
 
-# Plot points and epipolar lines
-plot_points_lines(image1, selected_x1s, epipolar_lines_normalized)
+# Plot the points and their corresponding epipolar lines on the image
 plot_points_lines(image1, selected_x1s, epipolar_lines_unnormalized)
-
-# Compute errors
-errors = compute_epipolar_errors(F_normalized, x1s, x2s)
-plt.hist(errors, bins=100)
-plt.title("Histogram of Epipolar Errors (Normalized)")
-plt.xlabel("Distance")
-plt.ylabel("Frequency")
-plt.show()
-
-# Compute mean distance
-mean_distance = np.mean(errors)
-print("Mean distance normalized:", mean_distance)
 
 # Compute errors
 errors = compute_epipolar_errors(F_unnormalized, x1s, x2s)
@@ -312,7 +304,7 @@ K = mat['K']
 x1s_normalized = np.linalg.inv(K) @ x1s
 x2s_normalized = np.linalg.inv(K) @ x2s
 
-E = estimate_E_DLT(x1s_normalized, x2s_normalized)
+E = estimate_E_DLT(x1s_normalized, x2s_normalized, normalize=False)
 
 # Check the epipolar constraints for a set of points
 epipolar_constraints = [x2s_normalized[:, i].T @ E @ x1s_normalized[:, i] for i in range(x1s_normalized.shape[1])]
@@ -321,8 +313,14 @@ mean_constraint = np.mean(epipolar_constraints)
 
 print("Mean of epipolar constraints:", mean_constraint)
 
-F = np.linalg.inv(K).T @ E @ np.linalg.inv(K)
+U, S, Vt = np.linalg.svd(E)
+S_normalized = [1, 1, 0]  # Adjust the singular values
+E_normalized = U @ np.diag(S_normalized) @ Vt
 
+print(E_normalized)
+
+# Convert the essential matrix back to the fundamental matrix
+F = np.linalg.inv(K).T @ E_normalized @ np.linalg.inv(K)
 
 # Select 20 random points from the second image
 selected_indices = np.random.choice(x2s.shape[1], 20, replace=False)
@@ -331,17 +329,25 @@ selected_x1s = x1s[:, selected_indices]
 
 # Compute epipolar lines
 epipolar_lines = compute_epipolar_lines(F, selected_x1s)
-
-# Plot the points and their corresponding epipolar lines on the image
 plot_points_lines(image2, selected_x2s, epipolar_lines)
+errors = compute_epipolar_errors(F, selected_x1s, selected_x2s)
+
+average_distance = np.mean(errors)
+print("Average point-to-line distance in pixels:", average_distance)
 
 # Compute distances
 errors = compute_epipolar_errors(F, selected_x1s, selected_x2s)
+plt.hist(errors, bins=100)
+plt.title("Histogram of Epipolar Errors")
+plt.xlabel("Distance")
+plt.ylabel("Frequency")
+plt.show()
 
 # ---------------------- EX3 -----------------------
 print('---------------------- EX3 -----------------------')
 # ---------------------- EX3 -----------------------
 
+E = estimate_E_DLT(x1s, x2s)
 camera_matrices = extract_P_from_E(E)
 
 best_solution = None
@@ -361,56 +367,77 @@ print("Best solution:", best_solution)
 P1_unnorm = K @ np.hstack((np.eye(3), np.array([[0], [0], [0]])))
 P2_unnorm = K @ best_solution
 
-# Triangulate each pair of points
-triangulated_points = []
-for i in range(len(matches)):
-    idx1 = matches[i].queryIdx
-    idx2 = matches[i].trainIdx
-    point3D = triangulate_3D_point_DLT(keypoints1_homogeneous[idx1], keypoints2_homogeneous[idx2], M1, M2)
-    triangulated_points.append(point3D)
+triangulated_points = [triangulate_point(P1_unnorm, P2_unnorm, x1s[:, i], x2s[:, i]) for i in range(x1s.shape[1])]
+projected_points = project_points(P2_unnorm, triangulated_points)
 
+best_P =  best_solution
+best_points_3d = np.array(triangulated_points)
+# Extract the rotational part and the translation vector from the best camera matrix
+R = best_P[:, :3]
+t = best_P[:, 3]
 
-plt.scatter(x2s[0, :], x2s[1, :], c='blue', label='Original Image Points', s=7)
-plt.scatter(projected_points[0, :], projected_points[1, :], c='red', label='Projected Points', s=7)
-plt.imshow(image2)
+# Apply the inverse transformation to the rotational part
+R_unnormalized = np.linalg.inv(T2).dot(R).dot(T1)
+
+# For the translation vector, you can directly multiply it by the inverse of T2
+# since it's a 3x1 vector
+t_unnormalized = np.linalg.inv(T2).dot(t)
+
+# Reconstruct the unnormalized camera matrix
+best_P_unnormalized = np.hstack((R_unnormalized, t_unnormalized.reshape(-1, 1)))
+
+# Calculate the mean position of the points
+mean_position = np.mean(best_points_3d[:, :3], axis=0)
+
+# Calculate the distance of each point from the mean position
+distances = np.linalg.norm(best_points_3d[:, :3] - mean_position, axis=1)
+
+# Set a threshold for filtering out outliers
+threshold = distances.mean() + 2 * distances.std()
+
+# Filter points
+filtered_points = best_points_3d[distances < threshold]
+
+# Project the 3D points
+best_solution = None
+max_points_in_front = 0
+
+# Identity matrix for the first camera
+P1 = np.hstack((np.eye(3), np.array([[0], [0], [0]])))
+
+for P2 in camera_matrices:
+    count = count_points_in_front(P1, P2, x1s, x2s)
+    if count > max_points_in_front:
+        max_points_in_front = count
+        best_solution = P2
+
+print("Best solution:", best_solution)
+
+P1_unnorm = K @ np.hstack((np.eye(3), np.array([[0], [0], [0]])))
+P2_unnorm = K @ best_solution
+
+projected_points = project_points(P2_unnorm, triangulated_points)
+
+plt.scatter(x2s[0, :], x2s[1, :], c='blue', label='Original Image Points')
+plt.scatter(projected_points[0, :], projected_points[1, :], c='red', label='Projected Points')
 plt.legend()
 plt.xlabel('X-axis')
 plt.ylabel('Y-axis')
 plt.title('Original vs Projected Points')
+plt.imshow(image2)
 plt.show()
 
-errors = np.sqrt(np.sum((x2s[:2, :] - projected_points)**2, axis=0))
-print("Mean projection error:", np.mean(errors))
-
-# Camera center for the first camera
-C1 = np.array([0, 0, 0])
-
-# Camera center for the second camera (from the projection matrix)
-C2 = -np.linalg.inv(P2_unnorm[:, :3]) @ P2_unnorm[:, 3]
-
-# Principal axes (assuming the rotation matrix is the first 3x3 part of the projection matrix)
-principal_axis1 = P1_unnorm[:, :3][2]
-principal_axis2 = P2_unnorm[:, :3][2]
-
-# Assuming triangulated_points is a list of 3D points
-triangulated_points_np = np.array(triangulated_points)
-
-# Set up a 3D plot
+# Plot 3d figure
 fig = plt.figure()
 ax = fig.add_subplot(111, projection='3d')
-
-# Plot the 3D points
-ax.scatter(triangulated_points_np[:, 0], triangulated_points_np[:, 1], triangulated_points_np[:, 2], c='b', marker='o', label='Triangulated 3D Points')
-
-# Plotting the cameras
-plot_camera(P1_unnorm, s=1, ax=ax)  # First camera
-plot_camera(P2_unnorm, s=1, ax=ax)  # Second camera
-
-# Setting labels and title
-ax.set_xlabel('X Axis')
-ax.set_ylabel('Y Axis')
-ax.set_zlabel('Z Axis')
-ax.set_title('3D Points with Camera Centers and Principal Axes')
-ax.legend()
-
+ax.scatter(filtered_points[:, 0], filtered_points[:, 1], filtered_points[:, 2], s=20, c='red', label='Filtered Points')
+#include the cameras in the plot
+plot_camera(P1_unnorm, ax=ax)
+plot_camera(P2_unnorm, ax=ax)
+ax.set_xlim(-10, 10)
+ax.set_ylim(-10, 10)
+ax.set_zlim(-10, -25)
+ax.set_xlabel('X')
+ax.set_ylabel('Y')
+ax.set_zlabel('Z')
 plt.show()
