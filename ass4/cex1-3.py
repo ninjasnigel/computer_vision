@@ -1,301 +1,5 @@
-import numpy as np
-from scipy.linalg import null_space
-import scipy.io
-import matplotlib.pyplot as plt
-from numpy.linalg import svd
-from mpl_toolkits.mplot3d import Axes3D
-import cv2
-
-def normalize_points(points):
-    mean = np.mean(points[:2], axis=1)
-    std_dev = np.std(points[:2], axis=1)
-    T = np.array([[1/std_dev[0], 0, -mean[0]/std_dev[0]],
-                [0, 1/std_dev[1], -mean[1]/std_dev[1]],
-                [0, 0, 1]])
-    normalized_points = T @ points
-    return normalized_points, T, mean, std_dev
-
-def camera_center_axis(P):
-    from scipy.linalg import null_space
-
-    # Calculate the camera center as the null space of P
-    C = null_space(P)
-    C = C / C[-1]  # Normalize to convert to homogeneous coordinates
-
-    # The principal axis can be approximated by the third column of M normalized
-    M = P[:, :-1]
-    a = M[-1, :]
-    print(a, a / np.linalg.norm(a), "principal axis")
-    a = a / np.linalg.norm(a)  # Normalize the principal axis
-
-    return C.flatten()[:-1], a  # Flatten and exclude the last component of C
-
-def estimate_F_DLT(x1s, x2s):
-    # Normalize the points
-    x1s_normalized, T1, _, _ = normalize_points(x1s)
-    x2s_normalized, T2, _, _ = normalize_points(x2s)
-
-    # Set up matrix M
-    num_points = x1s.shape[1]
-    M = np.zeros((num_points, 9))
-    for i in range(num_points):
-        x1 = x1s_normalized[:, i]
-        x2 = x2s_normalized[:, i]
-        M[i] = [x2[0]*x1[0], x2[0]*x1[1], x2[0], x2[1]*x1[0], x2[1]*x1[1], x2[1], x1[0], x1[1], 1]
-
-    # Solve using SVD
-    U, S, Vh = svd(M)
-    v = Vh[-1]  # Last row of Vh (V.T)
-
-    # Construct fundamental matrix
-    F_tilde = v.reshape(3, 3)
-
-    # Enforce rank-2 constraint
-    Uf, Sf, Vhf = svd(F_tilde)
-    Sf[2] = 0  # Set the smallest singular value to zero
-    F_tilde = Uf @ np.diag(Sf) @ Vhf
-
-    return F_tilde, T1, T2
-
-def estimate_F_DLT_no_normalization(x1s, x2s):
-
-    # Set up matrix M
-    num_points = x1s.shape[1]
-    M = np.zeros((num_points, 9))
-    for i in range(num_points):
-        x1 = x1s[:, i]
-        x2 = x2s[:, i]
-        M[i] = [x2[0]*x1[0], x2[0]*x1[1], x2[0], x2[1]*x1[0], x2[1]*x1[1], x2[1], x1[0], x1[1], 1]
-
-    # Solve using SVD
-    U, S, Vh = svd(M)
-    v = Vh[-1]  # Last row of Vh (V.T)
-
-    # Construct fundamental matrix
-    F_tilde = v.reshape(3, 3)
-
-    # Enforce rank-2 constraint
-    Uf, Sf, Vhf = svd(F_tilde)
-    Sf[2] = 0  # Set the smallest singular value to zero
-    F_tilde = Uf @ np.diag(Sf) @ Vhf
-
-    return F_tilde, 0, 0
-
-def estimate_E_DLT(x1s, x2s, normalize=True):
-    # Normalize the points
-    if normalize:
-        x1s_normalized, T1, _, _ = normalize_points(x1s)
-        x2s_normalized, T2, _, _ = normalize_points(x2s)
-    else:
-        x1s_normalized = x1s
-        x2s_normalized = x2s
-
-    # Set up matrix M
-    num_points = x1s.shape[1]
-    M = np.zeros((num_points, 9))
-    for i in range(num_points):
-        x1 = x1s_normalized[:, i]
-        x2 = x2s_normalized[:, i]
-        M[i] = [x2[0]*x1[0], x2[0]*x1[1], x2[0], x2[1]*x1[0], x2[1]*x1[1], x2[1], x1[0], x1[1], 1]
-
-    # Solve using SVD
-    U, S, Vh = svd(M)
-    v = Vh[-1]  # Last row of Vh (V.T)
-
-    # Construct essential matrix
-    E_tilde = v.reshape(3, 3)
-
-    # Enforce the constraints on the essential matrix
-    Ue, Se, Vhe = np.linalg.svd(E_tilde)
-    Se = [1, 1, 0]  # Two singular values set to 1, and the third to 0
-    E = Ue @ np.diag(Se) @ Vhe
-
-    return E
-
-def convert_E_to_F(E, K1, K2):
-    # Convert the essential matrix back to the fundamental matrix
-    F = np.linalg.inv(K2).T @ E @ np.linalg.inv(K1)
-    return F
-
-def compute_epipolar_lines(F, x1s):
-    # Compute the epipolar lines for points in x1s
-    lines = F @ x1s
-    return lines
-
-def enforce_essential(E_approx):
-    # Enforce the constraints on the essential matrix
-    Ue, Se, Vhe = np.linalg.svd(E_approx)
-    Se = [1, 1, 0]  # Two singular values set to 1, and the third to 0
-    E = Ue @ np.diag(Se) @ Vhe
-    return E
-
-def calculate_distance(point, line):
-    """Calculate the distance between a point and a line."""
-    x, y, w = point
-    a, b, c = line
-    return np.abs(a*x + b*y + c) / np.sqrt(a**2 + b**2)
-
-def compute_rms_error(points, lines):
-    """Compute the RMS error between points and their corresponding epipolar lines."""
-    distances_squared = []
-    for point, line in zip(points.T, lines.T):
-        distance = calculate_distance(point, line)
-        distances_squared.append(distance**2)
-    rms_error = np.sqrt(np.mean(distances_squared))
-    return rms_error
-
-def draw_line(ax, line, img_shape):
-    """
-    Draw a line given by 'ax + by + c = 0' on the axes 'ax'.
-    """
-    a, b, c = line
-    x0, x1 = 0, img_shape[1]  # x-coordinates for the left and right edges of the image
-
-    # Calculate the corresponding y-coordinates using the line equation
-    # y = (-a*x - c) / b
-    if b != 0:
-        y0, y1 = (-a*x0 - c) / b, (-a*x1 - c) / b
-        ax.plot([x0, x1], [y0, y1], linewidth=1, color='yellow')
-
-def plot_points_lines(image, points, lines):
-    """
-    Plot points and their corresponding epipolar lines on the given image.
-    """
-    dpi = 100
-    height, width, _ = image.shape
-    figsize = width / dpi, height / dpi
-
-    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-    ax.imshow(image)
-
-    # Set the axis limits to the image dimensions
-    ax.set_xlim(0, width)
-    ax.set_ylim(height, 0)
-
-    # Remove axis ticks
-    ax.set_xticks([])
-    ax.set_yticks([])
-
-    # Draw each point and its corresponding line
-    for point, line in zip(points.T, lines.T):
-        ax.scatter(point[0], point[1], c='blue', s=20)
-        draw_line(ax, line, image.shape)
-
-    plt.show()
-
-def distance_point_line(point, line):
-    # Compute the distance between a point and a line
-    # The line is given as ax + by + c = 0, and the point is (x, y, 1)
-    a, b, c = line
-    x, y, _ = point
-    distance = abs(a*x + b*y + c) / np.sqrt(a**2 + b**2)
-    return distance
-
-def compute_epipolar_errors(F, x1s, x2s):
-    # Compute epipolar lines for x2s
-    lines = compute_epipolar_lines(F, x1s)
-
-    # Compute distances for each point-line pair
-    distances = np.array([distance_point_line(x2s[:, i], lines[:, i]) for i in range(x2s.shape[1])])
-
-    return distances
-
-def estimate_E_robust(K, x1, x2, iterations=100, threshold=1, early_stop_inliers=5000000):
-    best_E = None
-    max_inliers = 0
-    K_inv = np.linalg.inv(K)
-
-    for iteration in range(iterations):
-        print('Iteration', iteration)
-        # Randomly select 8 point correspondences
-        indices = np.random.choice(x1.shape[1], 8, replace=True)
-        x1_sample = x1[:, indices]
-        x2_sample = x2[:, indices]
-
-        # Convert to homogeneous coordinates if necessary
-        if x1_sample.shape[0] != 3:
-            x1_sample = np.vstack([x1_sample, np.ones((1, x1_sample.shape[1]))])
-        if x2_sample.shape[0] != 3:
-            x2_sample = np.vstack([x2_sample, np.ones((1, x2_sample.shape[1]))])
-
-        # Normalize and estimate E using these points
-        x1_normalized = K_inv @ x1_sample
-        x2_normalized = K_inv @ x2_sample
-        E = estimate_E_DLT(x1_normalized, x2_normalized, normalize=False)
-
-        # Compute Fundamental Matrix F
-        F = convert_E_to_F(E, K, K)
-
-        # Compute errors and inliers
-        inliers = 0
-        for i in range(x1.shape[1]):
-            error = compute_point_error(F, x1[:, i], x2[:, i])
-            if error < threshold**2:
-                inliers += 1
-
-        # Update best model
-        if inliers > max_inliers:
-            best_E = E
-            max_inliers = inliers
-
-        # Early stopping if enough inliers are found
-        if max_inliers >= early_stop_inliers:
-            break
-
-    return best_E, max_inliers
-
-
-def compute_point_error(F, x1, x2):
-    """Compute the error for a single point correspondence."""
-    l1 = F @ x2
-    l2 = F.T @ x1
-    d1 = calculate_distance(x1, l1)**2
-    d2 = calculate_distance(x2, l2)**2
-    return 0.5 * (d1 + d2)
-
-import numpy as np
-
-def rq(a):
-    """
-    Perform RQ decomposition of a matrix 'a'.
-    Returns 'r' (upper triangular) and 'q' (unitary matrix).
-    If 'a' is not square, 'q' is extended accordingly.
-    """
-    m, n = a.shape
-    p = np.eye(m)[:, ::-1]  # Reversing the order of columns
-
-    q0, r0 = np.linalg.qr(np.dot(p, a[:, :m].T).dot(p))
-    r = np.dot(p, r0.T).dot(p)
-    q = np.dot(p, q0.T).dot(p)
-
-    fix = np.diag(np.sign(np.diag(r)))
-    r = np.dot(r, fix)
-    q = np.dot(fix, q)
-
-    if n > m:
-        q = np.concatenate((q, np.dot(np.linalg.inv(r), a[:, m:n])), axis=1)
-
-    return r, q
-
-def triangulate_3D_point_DLT(point1, point2, M1, M2):
-    """
-    Triangulate a 3D point from two corresponding 2D points in different images.
-    
-    :param point1: 2D point in the first image.
-    :param point2: 2D point in the second image.
-    :param M1: Camera matrix for the first image.
-    :param M2: Camera matrix for the second image.
-    :return: Triangulated 3D point.
-    """
-    A = np.zeros((4, 4))
-    A[0] = point1[0] * M1[2] - M1[0]
-    A[1] = point1[1] * M1[2] - M1[1]
-    A[2] = point2[0] * M2[2] - M2[0]
-    A[3] = point2[1] * M2[2] - M2[1]
-
-    _, _, Vh = np.linalg.svd(A)
-    X = Vh[-1]
-    return X / X[-1]
+from funcs import *
+import sys
 
 # ---------------------- EX1 -----------------------
 print('---------------------- EX1 -----------------------')
@@ -339,23 +43,25 @@ print('RMS Error for x2 and l2:', rms_error_x2_l2)
 # Compute epipolar errors
 errors = compute_epipolar_errors(F, x1s, x2s)
 
-# Plot histogram of epipolar errors
-plt.hist(errors, bins=100)
-plt.title('Histogram of epipolar errors')
-plt.xlabel('Distance')
-plt.ylabel('Number of points')
-plt.show()
+if "a" in sys.argv:
+    # Plot histogram of epipolar errors
+    plt.hist(errors, bins=100)
+    plt.title('Histogram of epipolar errors')
+    plt.xlabel('Distance')
+    plt.ylabel('Number of points')
+    plt.show()
 
 # Plot the points and their corresponding epipolar lines in both images
 selected_indices = np.random.choice(x2s.shape[1], 20, replace=False)
 selected_x2s = x2s[:, selected_indices]
 selected_x1s = x1s[:, selected_indices]
 
-# Plot the points and their corresponding epipolar lines in both images
-plot_points_lines(img2, selected_x2s, lines2[:, selected_indices])
+if "a" in sys.argv:
+    # Plot the points and their corresponding epipolar lines in both images
+    plot_points_lines(img2, selected_x2s, lines2[:, selected_indices])
 
 # Estimate E using RANSAC
-E_robust, inliers = estimate_E_robust(K, x1s, x2s, iterations=100)
+E_robust, inliers = estimate_E_robust(K, x1s, x2s, iterations=1)
 
 print('Estimated E with RANSAC:', E_robust)
 print('Number of inliers:', inliers)
@@ -378,28 +84,257 @@ print('RMS Error for x2 and l2:', rms_error_x2_l2)
 # Compute epipolar errors
 errors = compute_epipolar_errors(F_robust, x1s, x2s)
 
-# Plot histogram of epipolar errors
-plt.hist(errors, bins=100)
-plt.title('Histogram of epipolar errors')
-plt.xlabel('Distance')
-plt.ylabel('Number of points')
-plt.show()
+if "a" in sys.argv:
+    # Plot histogram of epipolar errors
+    plt.hist(errors, bins=100)
+    plt.title('Histogram of epipolar errors')
+    plt.xlabel('Distance')
+    plt.ylabel('Number of points')
+    plt.show()
 
 # Plot the points and their corresponding epipolar lines in both images
 selected_indices = np.random.choice(x2s.shape[1], 20, replace=False)
 selected_x2s = x2s[:, selected_indices]
 selected_x1s = x1s[:, selected_indices]
 
-# Plot the points and their corresponding epipolar lines in both images
-plot_points_lines(img2, selected_x2s, lines2[:, selected_indices])
+if "a" in sys.argv:
+    # Plot the points and their corresponding epipolar lines in both images
+    plot_points_lines(img2, selected_x2s, lines2[:, selected_indices])
 
 # ---------------------- EX2 -----------------------
 print('---------------------- EX2 -----------------------')
 # ---------------------- EX2 -----------------------
 
+def pipeline_to_3D(K, img1, img2):
+    
+    sift = cv2.xfeatures2d.SIFT_create()
+
+    keypoints1, descriptors1 = sift.detectAndCompute(img1, None)
+    keypoints2, descriptors2 = sift.detectAndCompute(img2, None)
+
+    bf = cv2.BFMatcher(cv2.NORM_L2, crossCheck=True)
+
+    matches = bf.match(descriptors1, descriptors2)
+    matches = sorted(matches, key = lambda x:x.distance)
+
+    # Convert matches to points
+    points1 = np.float32([keypoints1[m.queryIdx].pt for m in matches]).T
+    points2 = np.float32([keypoints2[m.trainIdx].pt for m in matches]).T
+
+    # Convert to homogeneous coordinates (add a row of 1s)
+    keypoints1_homogeneous = np.array([kp.pt + (1,) for kp in keypoints1])
+    keypoints2_homogeneous = np.array([kp.pt + (1,) for kp in keypoints2])
+
+    K_inv = np.linalg.inv(K)
+
+    x1 = points1.reshape(2, -1)
+    x2 = points2.reshape(2, -1)
+
+    x1_homogeneous = np.vstack([x1, np.ones((1, x1.shape[1]))])
+    x2_homogeneous = np.vstack([x2, np.ones((1, x2.shape[1]))])
+
+    # Estimate E using RANSAC with homogeneous coordinates
+    E, inliers = estimate_E_robust(K, x1_homogeneous, x2_homogeneous, iterations=250, threshold=15)
+
+    print('Estimated E with RANSAC:', E)
+
+    print('Inliers:', inliers)
+    triangulated_points = []
+    for i, (M1, M2) in enumerate(get_camera_matrix_pairs(E)):
+        
+        if "ass3" in sys.argv:
+            best_solution = M2
+
+            print("Best solution:", best_solution)
+
+            P1_unnorm = K @ np.hstack((np.eye(3), np.array([[0], [0], [0]])))
+            P2_unnorm = K @ best_solution
+
+            triangulated_points = [triangulate_point(P1_unnorm, P2_unnorm, x1s[:, i], x2s[:, i]) for i in range(x1s.shape[1])]
+            projected_points = project_points(P2_unnorm, triangulated_points)
+
+            best_P =  best_solution
+            best_points_3d = np.array(triangulated_points)
+            # Extract the rotational part and the translation vector from the best camera matrix
+            R = best_P[:, :3]
+            t = best_P[:, 3]
+
+            # Calculate the mean position of the points
+            mean_position = np.mean(best_points_3d[:, :3], axis=0)
+
+            # Calculate the distance of each point from the mean position
+            distances = np.linalg.norm(best_points_3d[:, :3] - mean_position, axis=1)
+
+            # Set a threshold for filtering out outliers
+            threshold = distances.mean() + 2 * distances.std()
+
+            # Filter points
+            filtered_points = best_points_3d[distances < threshold]
+
+            # Project the 3D points
+            best_solution = None
+            max_points_in_front = 0
+
+            # Identity matrix for the first camera
+            P1 = np.hstack((np.eye(3), np.array([[0], [0], [0]])))
+
+            print("Best solution:", best_solution)
+
+            P1_unnorm = K @ np.hstack((np.eye(3), np.array([[0], [0], [0]])))
+            P2_unnorm = K @ best_solution
+
+            projected_points = project_points(P2_unnorm, triangulated_points)
+
+            plt.scatter(x2s[0, :], x2s[1, :], c='blue', label='Original Image Points')
+            plt.scatter(projected_points[0, :], projected_points[1, :], c='red', label='Projected Points')
+            plt.legend()
+            plt.xlabel('X-axis')
+            plt.ylabel('Y-axis')
+            plt.title('Original vs Projected Points')
+            plt.imshow(img2)
+            plt.show()
+
+            # Plot 3d figure
+            fig = plt.figure()
+            ax = fig.add_subplot(111, projection='3d')
+            ax.scatter(filtered_points[:, 0], filtered_points[:, 1], filtered_points[:, 2], s=20, c='red', label='Filtered Points')
+            #include the cameras in the plot
+            plot_camera(P1_unnorm, ax=ax)
+            plot_camera(P2_unnorm, ax=ax)
+            ax.set_xlim(-10, 10)
+            ax.set_ylim(-10, 10)
+            ax.set_zlim(-10, -25)
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            ax.set_zlabel('Z')
+            plt.show()
+
+        if "ass2" in sys.argv:
+            # TESTING 2D-------------------
+            triangulated_points = []
+            for i in range(len(matches)):
+                idx1 = matches[i].queryIdx
+                idx2 = matches[i].trainIdx
+                point3D = triangulate_3D_point_DLT(keypoints1_homogeneous[idx1], keypoints2_homogeneous[idx2], M1, M2)
+                triangulated_points.append(point3D)
+
+            triangulated_points = np.array(triangulated_points)
+
+            # Project the points
+            projected_points1 = project_points(triangulated_points, M1)
+            projected_points2 = project_points(triangulated_points, M2)
+
+            # Assuming img1 and img2 are your image arrays, get their dimensions
+            height1, width1 = img1.shape[:2]
+            height2, width2 = img2.shape[:2]
+
+            # Function to filter points based on image dimensions
+            def filter_points(points, width, height):
+                return [p for p in points if 0 <= p[0] < width and 0 <= p[1] < height]
+
+            # Filter the projected points
+            filtered_projected_points1 = filter_points(projected_points1, width1, height1)
+            filtered_projected_points2 = filter_points(projected_points2, width2, height2)
+
+            # Plotting for the first image with filtered points
+            plt.figure(figsize=(10, 8))
+            plt.imshow(img1, cmap='gray')
+            plt.scatter([kp.pt[0] for kp in keypoints1], [kp.pt[1] for kp in keypoints1], c='r', s=5)
+            plt.scatter([p[0] for p in filtered_projected_points1], [p[1] for p in filtered_projected_points1], c='b', s=5)
+            plt.title('Image 1: Original SIFT Points (Red) and Projected Points (Blue)')
+            plt.show()
+
+            # TESTING 3D-------------------
+
+            camera_center1 = -np.linalg.inv(M1[:, :3]) @ M1[:, 3]
+            camera_center2 = -np.linalg.inv(M2[:, :3]) @ M2[:, 3]
+
+            # extract the principal axis
+            C1, a1 = camera_center_axis(M1)
+            C2, a2 = camera_center_axis(M2)
+
+            # Create arrays of matched keypoints
+            matched_keypoints1 = np.array([keypoints1[match.queryIdx].pt for match in matches])
+            matched_keypoints2 = np.array([keypoints2[match.trainIdx].pt for match in matches])
+
+            errors1 = compute_pixel_error(projected_points1, matched_keypoints1, K)
+            errors2 = compute_pixel_error(projected_points2, matched_keypoints2, K)
+
+            # Rest of your filtering and plotting logic
+            valid_indices = (errors1 < 10) & (errors2 < 10)
+            filtered_3D_points = triangulated_points[valid_indices]
+
+            x_limit = (-50, 50)
+            y_limit = (-50, 50)
+            z_limit = (-50, 50)
+
+            # Apply the limits
+            filtered_3D_points = filtered_3D_points[(filtered_3D_points[:, 0] > x_limit[0]) & (filtered_3D_points[:, 0] < x_limit[1]) &
+                                                    (filtered_3D_points[:, 1] > y_limit[0]) & (filtered_3D_points[:, 1] < y_limit[1]) &
+                                                    (filtered_3D_points[:, 2] > z_limit[0]) & (filtered_3D_points[:, 2] < z_limit[1])]
+
+
+            fig = plt.figure()
+            ax = fig.add_subplot(111, projection='3d')
+
+            # Plot the filtered triangulated 3D points
+            ax.scatter(filtered_3D_points[:, 0], filtered_3D_points[:, 1], filtered_3D_points[:, 2], c='blue', marker='o', label='Triangulated Points')
+
+            # Plot the camera positions
+            ax.scatter(camera_center1[0], camera_center1[1], camera_center1[2], c='red', marker='^', label='Camera 1')
+            ax.scatter(camera_center2[0], camera_center2[1], camera_center2[2], c='green', marker='^', label='Camera 2')
+
+            # Set labels and title
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            ax.set_zlabel('Z')
+            ax.set_title('3D Visualization with Cameras and Cube Model')
+            ax.legend()
+
+            plt.show()
+
+
+
+    # Initialize variables to hold the best result
+    best_solution = None
+    max_inliers = 0
+
+    # Normalize camera matrix pairs
+    """
+    for i, (P1, P2) in enumerate(camera_matrix_pairs):
+        # Triangulate 3D points for this camera pair
+        P1_unnorm = K @ P1
+        P2_unnorm = K @ P2
+        points_3d = [triangulate_point(P1_unnorm, P2_unnorm, p1, p2) for p1, p2 in zip(points1, points2)]
+        points_3d = np.array(points_3d)
+
+        if points_3d.shape[1] == 3:
+            points_3d = np.hstack([points_3d, np.ones((points_3d.shape[0], 1))])
+
+        # Filter points to find the number of inliers (points in front of both cameras)
+        inliers = sum((point[2] > 0 and (P2 @ point)[2] > 0) for point in points_3d)
+
+        # Update the best solution if this one is better
+        if inliers > max_inliers:
+            max_inliers = inliers
+            best_solution = (P1, P2, points_3d)
+
+        # Plotting (optional for each iteration)
+        plot_3d(points_3d, P1, P2)
+
+    # Plot the best solution
+    print(best_solution[2])
+    if best_solution:
+        P1, P2, points_3d = best_solution
+    else:
+        print('No solution found')
+"""
+    print("----func done----")
+
 # Load data
 data = scipy.io.loadmat('data/compEx2data.mat')
 K = data['K']
+print("Data contents" , data.keys())
 
 img1 = cv2.imread('data/fountain1.png')
 img1 = cv2.cvtColor(img1,cv2.COLOR_BGR2GRAY)
@@ -407,105 +342,4 @@ img1 = cv2.cvtColor(img1,cv2.COLOR_BGR2GRAY)
 img2 = cv2.imread('data/fountain2.png')
 img2 = cv2.cvtColor(img2,cv2.COLOR_BGR2GRAY)
 
-sift = cv2.xfeatures2d.SIFT_create()
-
-keypoints1, descriptors1 = sift.detectAndCompute(img1, None)
-keypoints2, descriptors2 = sift.detectAndCompute(img2, None)
-print('Number of features in image 1:', len(keypoints1))
-print('Number of features in image 2:', len(keypoints2))
-
-bf = cv2.BFMatcher(cv2.NORM_L2, crossCheck=True)
-
-matches = bf.match(descriptors1, descriptors2)
-
-matches = sorted(matches, key = lambda x:x.distance)
-print('Number of matches:', len(matches))
-
-matched_img = cv2.drawMatches(img1, keypoints1, img2, keypoints2, matches[:50], None, flags=2)
-
-#set size of window smaller
-cv2.namedWindow('Matched Features', cv2.WINDOW_NORMAL)
-cv2.imshow('Matched Features', matched_img)
-cv2.imwrite('matched_features.jpg', matched_img)
-cv2.waitKey(0)
-cv2.destroyAllWindows()
-
-"""Now you should find the essential matrix describing the transformation between the two images.
-Because not all matches are correct, you need to use RANSAC to find a set of good correspondences
-(inliers). To estimate the essential matrix use the function estimate_E_robust(K,x1,x2) that you
-created in the previous computer exercise.
-How many inliers did you find?"""
-
-# Estimate E using RANSAC
-E_robust, inliers = estimate_E_robust(K, x1s, x2s, iterations=100)
-
-# Evaluate the Result
-print('Estimated E with RANSAC:', E_robust)
-print('Number of inliers:', np.sum(inliers))
-
-"""After getting the robust essential matrix estimation, you should find the camera matrix of the second
-view. Remember that there are 4 possible solutions (see Lecture 6 or the Theoretical Exercise 7 of
-HA3)! You should pick the solution that has more points in front of the camera.
-
-Find the 4 possible camera matrices pairs for the essential matrix that you estimated, and for
-each them:
-(a) Triangulate the 3D points using the camera matrix pair and image points;
-(b) Get the camera centers and principal direction of both cameras;
-(c) Plot everything in 3D;"""
-
-# Create arrays of matched keypoints
-
-K_inv = np.linalg.inv(K)
-
-keypoints1_normalized = np.array([K @ np.array(kp.pt + (1,)).T for kp in keypoints1])
-keypoints2_normalized = np.array([K @ np.array(kp.pt + (1,)).T for kp in keypoints2])
-
-M1_normalized = K @ x1s
-M2_normalized = K @ x2s
-
-triangulated_points = []
-for i in range(len(matches)):
-    idx1 = matches[i].queryIdx
-    idx2 = matches[i].trainIdx
-    point3D = triangulate_3D_point_DLT(keypoints1_normalized[idx1][:2], keypoints2_normalized[idx2][:2], M1_normalized, M2_normalized)
-    triangulated_points.append(point3D)
-
-matched_keypoints1 = np.array([keypoints1[match.queryIdx].pt for match in matches])
-matched_keypoints2 = np.array([keypoints2[match.trainIdx].pt for match in matches])
-
-x_limit = (-500, 500)
-y_limit = (-500, 500)
-z_limit = (-500, 500)
-
-filtered_3D_points = np.array(triangulated_points)
-
-# Apply the limits
-filtered_3D_points = filtered_3D_points[(filtered_3D_points[:, 0] > x_limit[0]) & (filtered_3D_points[:, 0] < x_limit[1]) &
-                                           (filtered_3D_points[:, 1] > y_limit[0]) & (filtered_3D_points[:, 1] < y_limit[1]) &
-                                           (filtered_3D_points[:, 2] > z_limit[0]) & (filtered_3D_points[:, 2] < z_limit[1])]
-
-# Get the camera centers and principal directions
-camera_center1 = -np.linalg.inv(x1s[:, :3]) @ x1s[:, 3]
-camera_center2 = -np.linalg.inv(x2s[:, :3]) @ x2s[:, 3]
-
-# extract the principal axis
-C1, a1 = camera_center_axis(x1s)
-C2, a2 = camera_center_axis(x1s)
-
-fig = plt.figure()
-ax = fig.add_subplot(111, projection='3d')
-
-ax.scatter(filtered_3D_points[:, 0], filtered_3D_points[:, 1], filtered_3D_points[:, 2], c='blue', marker='o', label='Triangulated Points')
-
-# Plot the camera positions
-ax.scatter(camera_center1[0], camera_center1[1], camera_center1[2], c='red', marker='^', label='Camera 1')
-ax.scatter(camera_center2[0], camera_center2[1], camera_center2[2], c='green', marker='^', label='Camera 2')
-
-# Set labels and title
-ax.set_xlabel('X')
-ax.set_ylabel('Y')
-ax.set_zlabel('Z')
-ax.set_title('3D Visualization with Cameras and Cube Model')
-ax.legend()
-
-plt.show()
+pipeline_to_3D(K, img1, img2)
