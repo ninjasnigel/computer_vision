@@ -266,6 +266,7 @@ selected_x1s = x1s[:, selected_indices]
 
 # Compute the un-normalized fundamental matrix
 F_normalized, T1, T2 = estimate_F_DLT(x1s, x2s)
+print(T1, T2, "T1, T2")
 F_unnormalized, _, _ = estimate_F_DLT_no_normalization(x1s, x2s)
 F_unnormalized /= F_unnormalized[2, 2]
 print("Original Estimated Fundamental Matrix:\n", F_unnormalized)

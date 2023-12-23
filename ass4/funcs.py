@@ -212,6 +212,7 @@ def estimate_E_robust(K, x1, x2, iterations=100, threshold=1, early_stop_inliers
     K_inv = np.linalg.inv(K)
 
     for iteration in range(iterations):
+        print("Iteration", iteration)
         # Randomly select 8 point correspondences
         indices = np.random.choice(x1.shape[1], 8, replace=True)
         x1_sample = x1[:, indices]
@@ -423,6 +424,7 @@ def get_camera_matrix_pairs(E):
 
     return camera_matrix_pairs
 
+
 def triangulate_point(P1, P2, x1, x2):
     # Construct matrix A for DLT
     A = np.array([
@@ -466,6 +468,31 @@ def is_in_front_of_camera(P, X):
     X_cam = P @ X_homog
     # Check if the z-coordinate is positive
     return X_cam[2] > 0
+
+
+def is_point_in_front_of_camera(P, point):
+    """
+    Check if a 3D point is in front of a camera.
+    P: Camera matrix
+    point: 3D point in homogeneous coordinates
+    Returns True if the point is in front of the camera.
+    """
+    transformed_point = P @ point
+    # Check if the Z-coordinate is positive
+    return transformed_point[2] > 0
+
+def filter_points_in_front_of_cameras(P1, P2, points):
+    """
+    Filter points that are in front of both cameras.
+    P1, P2: Camera matrices
+    points: List or array of 3D points in homogeneous coordinates
+    Returns a list of points that are in front of both cameras.
+    """
+    filtered_points = []
+    for point in points:
+        if is_point_in_front_of_camera(P1, point) and is_point_in_front_of_camera(P2, point):
+            filtered_points.append(point)
+    return np.array(filtered_points)
 
 def plot_camera(P, s=1, ax=None):
 
@@ -516,23 +543,101 @@ def extract_P_from_E(E):
 def compute_pixel_error(projected_points, matched_keypoints, K):
     return np.linalg.norm(projected_points - matched_keypoints, axis=1)
 
-def project_points(points_3D, M):
-    """
-    Project 3D points back to 2D using the camera matrix.
+def project_points(P, points):
+    projected_points = []
+    for X in points:
+        X_homog = np.append(X, 1)
+        x_projected = P @ X_homog
+        x_projected /= x_projected[2]  # Normalize to convert to homogenous coordinates
+        projected_points.append(x_projected[:2])
+    return np.array(projected_points).T
 
-    :param points_3D: Array of 3D points in homogeneous coordinates (x, y, z, w).
-    :param M: Camera matrix.
-    :return: Projected 2D points.
-    """
-    # Exclude the w component (last column) from the 3D points
-    points_3D = points_3D[:, :3]
+def ComputeReprojectionError(P_1, P_2, X_j, x_1j, x_2j):
+    # Project the 3D point onto each camera
+    x_proj_1 = P_1 @ X_j
+    x_proj_2 = P_2 @ X_j
 
-    # Convert to homogeneous coordinates by adding a row of ones
-    homogeneous_points = np.vstack((points_3D.T, np.ones((1, points_3D.shape[0]))))
+    # Normalize to get the pixel coordinates
+    x_proj_1 /= x_proj_1[2]
+    x_proj_2 /= x_proj_2[2]
 
-    # Project the points
-    points_2D = M.dot(homogeneous_points)
+    # Compute reprojection error
+    err_1 = np.linalg.norm(x_proj_1[:2] - x_1j)
+    err_2 = np.linalg.norm(x_proj_2[:2] - x_2j)
+    err = err_1 + err_2
 
-    # Normalize to convert from homogeneous coordinates
-    points_2D /= points_2D[2]
-    return points_2D[:2].T
+    # Compute residuals
+    res = np.hstack([(x_proj_1[:2] - x_1j), (x_proj_2[:2] - x_2j)])
+
+    return err, res
+
+import numpy as np
+
+def LinearizeReprojErr(P_1, P_2, X_j, x_1j, x_2j):
+    # Project the 3D point onto each camera
+    x_proj_1 = P_1 @ X_j
+    x_proj_2 = P_2 @ X_j
+
+    # Compute residuals
+    res_1 = x_proj_1[:2] / x_proj_1[2] - x_1j
+    res_2 = x_proj_2[:2] / x_proj_2[2] - x_2j
+    r = np.hstack([res_1, res_2])
+
+    # Compute Jacobian
+    J = np.zeros((4, 3))  # 4 rows (2 for each camera) and 3 columns (for X, Y, Z)
+
+    # Partial derivatives for the first camera
+    J[0, :] = [1 / x_proj_1[2], 0, -x_proj_1[0] / (x_proj_1[2]**2)]
+    J[1, :] = [0, 1 / x_proj_1[2], -x_proj_1[1] / (x_proj_1[2]**2)]
+
+    # Partial derivatives for the second camera
+    J[2, :] = [1 / x_proj_2[2], 0, -x_proj_2[0] / (x_proj_2[2]**2)]
+    J[3, :] = [0, 1 / x_proj_2[2], -x_proj_2[1] / (x_proj_2[2]**2)]
+
+    # Multiply Jacobian by the camera matrices
+    J[0:2, :] = P_1[0:2, 0:3] - x_proj_1[0] * P_1[2:3, 0:3] / x_proj_1[2]
+    J[2:4, :] = P_2[0:2, 0:3] - x_proj_2[0] * P_2[2:3, 0:3] / x_proj_2[2]
+
+    return r, J
+
+
+def ComputeUpdate(r, J, mu):
+    # Compute the LM update
+    A = J.T @ J + mu * np.eye(J.shape[1])
+    g = J.T @ r
+    delta_X_j = -np.linalg.inv(A) @ g
+    return delta_X_j
+
+def levenberg_marquardt(P1_unnorm, P2_unnorm, filtered_points_in_front, x1, x2, max_iterations=100, mu=0.01, threshold=1e-5):
+    # Parameters for LM optimization
+    max_iterations = 100
+    convergence_threshold = 1e-6
+    mu = 0.01  # Initial damping factor
+
+    if mu < 0.02:
+        return filtered_points_in_front
+
+    for i in range(filtered_points_in_front.shape[0]):
+        X_j = filtered_points_in_front[i, :]
+
+        for iteration in range(max_iterations):
+            # Compute reprojection error and residuals
+            err, r = ComputeReprojectionError(P1_unnorm, P2_unnorm, X_j, x1[:, i], x2[:, i])
+
+            # Linearize reprojection error
+            r, J = LinearizeReprojErr(P1_unnorm, P2_unnorm, X_j, x1[:, i], x2[:, i])
+
+            # Compute LM update
+            delta_X_j = ComputeUpdate(r, J, mu)
+
+            # Update the 3D point
+            X_j += delta_X_j
+
+            # Check for convergence
+            if np.linalg.norm(delta_X_j) < convergence_threshold:
+                break
+
+        # Update the filtered point
+        filtered_points_in_front[i, :] = X_j
+
+    return filtered_points_in_front

@@ -327,7 +327,6 @@ matched_keypoints2 = np.array([keypoints2[match.trainIdx].pt for match in matche
 errors1 = compute_pixel_error(projected_points1, matched_keypoints1, K1)
 errors2 = compute_pixel_error(projected_points2, matched_keypoints2, K2)
 
-# Rest of your filtering and plotting logic
 valid_indices = (errors1 < 3) & (errors2 < 3)
 filtered_3D_points = triangulated_points[valid_indices]
 
